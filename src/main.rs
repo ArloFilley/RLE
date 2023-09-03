@@ -1,118 +1,145 @@
-use std::{fs, env};
+use clap::Parser;
+
+use std::{
+    fs, fs::File,
+    io::Write, 
+    path, 
+    process::exit
+};
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(short, long)]
+    input_file: path::PathBuf,
+
+    #[arg(short, long)]
+    output_file: path::PathBuf,
+
+    #[arg(short, long)]
+    decode: bool,
+
+    #[arg(short, long)]
+    encode: bool,
+
+    #[arg(short, long)]
+    save_image: bool,
+
+    #[arg(short, long)]
+    width: Option<u16>
+}
+
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let mut input_filename: &String = &String::from("pattern.txt");
-    let mut key: u8 = 1; 
-    let mut output_filename: &String = &String::from("output.txt");
-    let mut output_filename_image: &String = &String::from("output.pbm");
-    let mut width: usize = 100;
-    if args.len() >= 3 {
-        input_filename = &args[1];
-        key = args[2].trim().parse().unwrap();
-        output_filename= &args[3];
-        output_filename_image= &args[4];
-        width= args[5].trim().parse().unwrap();
+    let args = Args::parse();
+
+    if args.encode == args.decode {
+        eprintln!("Error: You're decoding and encoding options are incorrect");
+        exit(0);
     }
 
-    let pattern = open_file(input_filename)
-        .expect("error reading file");
+    let input_file = match fs::read_to_string(args.input_file) {
+        Err(_) => { 
+            eprintln!("Error: Couldn't read input file"); 
+            exit(0); 
+        },
+        Ok(file) => { 
+            let f = file.replace("\n", "");
+            
+            f.as_bytes().to_vec()
+        },
+    };
 
-    if key == 1 {
-        create_image(output_filename_image, &pattern, width);
-        let compressed_pattern = compress(pattern)
-            .expect("error with compressing");
+    let mut output_file = match File::create(args.output_file) {
+        Err(_) => { 
+            eprintln!("Error: Couldn't create output file"); 
+            exit(0); 
+        },
+        Ok(file) => { file },
+    };
 
-        write_file(output_filename, compressed_pattern)
-            .expect("error writing file");
-    } else if key == 0 {
-        let decompressed_pattern = decompress(pattern, width)
-            .expect("error with decompressing");
-        println!("{}", decompressed_pattern);
-        create_image(output_filename_image, &decompressed_pattern, width);
-        write_file(output_filename, decompressed_pattern)
-            .expect("error writing file");
-    }
-}
+    let mut data = match (args.encode, args.decode) {
+        (true, false) => {
+            let mut data = input_file.encode();
+            data.remove(0);
 
-fn open_file(filename: &str) -> Result<String, std::io::Error> {
-    let contents = fs::read_to_string(filename)?;
+            let mut data = data
+                .iter().map(|x| format!("{x}, "))
+                .collect::<String>();
 
-    Ok( contents )
-}
+            data.insert(0, '[');
+            data.pop();
+            data.pop();
+            data.push(']');
 
-fn write_file(filename: &str, contents: String) -> Result<(), std::io::Error> {
-    fs::File::create(filename)?;
-    fs::write(filename, contents)?;
+            data
+        },
+        (false, true) => {
+            let data = serde_json::from_slice::<Vec<i32>>(&input_file).unwrap()
+                .decode()
+                .iter().map(|x| x.to_string())
+                .collect::<String>();
 
-    Ok(())
-}
-
-fn compress(string: String) -> Result<String, std::io::Error> {
-    let mut last_char = '2';
-    let mut a: usize = 1;
-    let mut return_string: String = String::from("");
-    for (i, c) in string.chars().enumerate() {
-        if c != '\n' {
-            if i == 0 {
-
-            } else if c == last_char {
-                a += 1;
-            } else {
-                return_string += &a.to_string();
-                return_string += ",";
-                a = 1;
-            }
-            if i == string.len()-1 {
-                return_string += &a.to_string();
-                return_string += ",";
-            }
-            last_char = c;
+            data
+        },
+        (_, _) => { 
+            eprintln!("Error: Decoding and encoding options are wrong"); 
+            exit(0);
         }
+    };
+
+    if args.decode && args.save_image {
+        data.insert_str(0, &format!("P1\n#Bitmap Image Generate by Rusty_RLE\n{} {}\n", args.width.unwrap(), data.len() as u16 / args.width.unwrap()))
     }
-    Ok( return_string )
+
+    output_file.write_all(data.as_bytes()).unwrap();
 }
 
-fn decompress(string: String, width: usize) -> Result<String, std::io::Error> {
-    let mut a: u8 = 0;
-    let mut b: u8 = 1;
-    let mut line: String = String::from("");
-    let mut return_string: String = String::from("");
-    for (_i, c) in string.chars().enumerate() {
-        if c == ',' {
-            for _i in 0..a {
-                line.push((b + 48) as char);
-                if line.len() == width {
-                    return_string.push_str(&line);
-                    return_string.push('\n');
-                    line = String::from("");
-                }
-            }
-            if b == 0 {
-                b = 1;
+pub trait Encode {
+    fn encode(&self) -> Vec<i32>;
+}
+
+pub trait Decode {
+    fn decode(&self) -> Vec<u8>;
+}
+
+impl Encode for [u8] {
+    fn encode(&self) -> Vec<i32> {
+        let mut bits = vec![];
+        let mut last_bit = 1;
+        let mut count = 0;
+
+        for bit in self {
+            if bit == &last_bit {
+                count += 1;
             } else {
-                b = 0;
+                bits.push(count);
+                count = 0;
             }
-            a = 0;
-        } else {
-            a *= 10;
-            a += c as u8 - 48;
+
+            last_bit = *bit;
         }
+
+        bits.push(count);
+
+        return bits
     }
-    return_string.remove(return_string.len()-1);
-    Ok( return_string )
 }
 
-fn create_image(filename: &str, contents: &String, width: usize) {
-    let mut my_string = String::from("P1\n");
-    my_string.push_str("# This image was generated by rust\n");
-    my_string.push_str(&width.to_string());
-    my_string.push(' ');
-    my_string.push_str(&(contents.len() / width).to_string());
-    my_string.push('\n');
-    for i in  contents.chars() {
-        my_string.push(i);
-        my_string.push(' ');
+impl Decode for [i32] {
+    fn decode(&self) -> Vec<u8> {
+        let mut buf: Vec<u8> = vec![];
+
+        let mut byte = 1;
+        for num in self {
+            (0..=*num).for_each(|_| buf.push(byte) );
+
+            if byte == 1 {
+                byte = 0;
+            } else {
+                byte = 1;
+            }
+        }
+
+        buf
     }
-    write_file(filename, my_string)
-        .expect("error generating image");
 }
